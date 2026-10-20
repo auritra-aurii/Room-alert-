@@ -4,18 +4,15 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#312e81">
-<meta name="color-scheme" content="light">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<meta name="apple-mobile-web-app-title" content="Room Alert">
 <meta name="mobile-web-app-capable" content="yes">
-<meta name="application-name" content="Room Alert">
+<meta name="apple-mobile-web-app-title" content="Room Alert">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <title>Room Alert</title>
 <script src="https://cdn.tailwindcss.com/3.4.17"></script>
 <style>
-  html,body{height:100%;overscroll-behavior:none}
-  body{-webkit-tap-highlight-color:transparent;user-select:none;-webkit-user-select:none;padding-top:env(safe-area-inset-top);padding-bottom:env(safe-area-inset-bottom)}
-  #audioGate.hidden{display:none!important}
+  html,body{height:100%}
+  body{-webkit-tap-highlight-color:transparent;user-select:none;padding-top:env(safe-area-inset-top);padding-bottom:env(safe-area-inset-bottom)}
 
   /* ---- Calling bell ---- */
   .bell-wrap{position:relative;width:min(74vw,17rem);aspect-ratio:1;margin:1.5rem auto}
@@ -55,41 +52,36 @@
       <span id="dot" class="w-3.5 h-3.5 rounded-full bg-slate-400"></span>
       <span id="conn" class="text-base font-medium text-slate-700">Connecting…</span>
     </div>
-    <button id="roleToggle" class="text-xs text-slate-400 underline"></button>
+    <div class="flex items-center gap-3"><button id="soundMode" class="hidden"></button><button id="roleToggle" class="text-xs text-slate-400 underline"></button></div>
   </header>
 
   <div id="cfgWarn" class="hidden bg-yellow-100 border border-yellow-400 text-yellow-900 rounded-xl p-3 text-sm">
     Firebase not configured. Edit <code>firebaseConfig</code> in the script block.
   </div>
 
-  <!-- Offline banner: alerts cannot arrive while this is visible -->
-  <div id="netBar" role="alert" class="hidden bg-red-600 text-white rounded-xl px-4 py-3 text-lg font-bold text-center shadow"></div>
-
-  <!-- Non-blocking nudge: only shows if browser still needs a tap for sound / notifications -->
-  <button id="enableChip" class="hidden press w-full bg-indigo-600 text-white rounded-xl py-3 text-lg font-bold shadow"></button>
-
   <main id="view" class="flex-1 flex flex-col gap-3"></main>
 </div>
 
-<!-- One-time setup (first launch only) -->
+<!-- Audio unlock overlay -->
 <div id="audioGate" class="fixed inset-0 z-50 bg-indigo-800 text-white flex flex-col items-center justify-center gap-6 p-8 text-center">
   <div class="text-7xl">🔔</div>
   <h1 class="text-4xl font-black">Room Alert</h1>
-  <p class="text-indigo-100 text-lg">One-time setup. Tap to allow sound and alerts. You won't be asked again.</p>
+  <p class="text-indigo-100 text-lg">Tap once to turn on sound and alerts.</p>
   <button id="audioBtn" class="press bg-white text-indigo-800 font-black text-2xl rounded-full px-12 py-6 shadow-2xl">Enable Sound</button>
 </div>
-<!-- Hide gate BEFORE first paint if already authorized on this device -->
-<script>try{if(localStorage.getItem("soundAuthorized")==="true"||localStorage.getItem("roomAlert.soundEnabled.v1")==="1")document.getElementById("audioGate").classList.add("hidden")}catch(e){}</script>
+
+<script>try{if(localStorage.getItem('soundEnabled')==='true')document.getElementById('audioGate').classList.add('hidden')}catch(e){}</script>
 
 <!-- Alert overlay (son) -->
 <div id="alertOv" class="hidden fixed inset-0 z-40 flex-col items-center justify-center p-5 text-center overflow-y-auto">
+  <button id="resumeBar" class="hidden press mb-5 bg-black text-white font-bold text-xl rounded-2xl px-5 py-4 w-full max-w-md">🔊 Tap here to turn sound on</button>
   <div id="alertHead" class="text-4xl font-black mb-6 leading-tight"></div>
   <div id="alertBtns" class="flex flex-col gap-4 w-full max-w-md"></div>
 </div>
 
 <script type="module">
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
-import { getDatabase, ref, onValue, set, update, get, goOffline, goOnline }
+import { getDatabase, ref, onValue, set, update, get, goOnline, serverTimestamp }
   from "https://www.gstatic.com/firebasejs/10.12.2/firebase-database.js";
 
 /* ===== FIREBASE CONFIG ===== */
@@ -104,109 +96,54 @@ const firebaseConfig = {
 };
 /* ============================================== */
 
-/* ---------- Constants & helpers (all declared first: no TDZ crashes) ---------- */
 const $ = id => document.getElementById(id);
 const params = new URLSearchParams(location.search);
 const role = params.get("role") === "mother" ? "mother" : "son";
 const RESPONSES = ["On my way!", "In washroom", "Coming in 5 mins", "Coming in 10 mins"];
 const configured = !firebaseConfig.apiKey.startsWith("YOUR_");
-const LS_AUTH = "soundAuthorized", LS_OLD = "roomAlert.soundEnabled.v1";
-const TONES = {
-  idle:  "bg-white border-slate-500 text-slate-900",
-  call:  "bg-amber-300 border-amber-600 text-amber-950",
-  emerg: "bg-red-700 border-red-900 text-white",
-  reply: "bg-green-700 border-green-900 text-white"
+const LS = {
+  get: k => { try { return localStorage.getItem(k); } catch (e) { return null; } },
+  set: (k, v) => { try { localStorage.setItem(k, v); } catch (e) {} }
 };
-const lsGet = k => { try { return localStorage.getItem(k); } catch (e) { return null; } };
-const lsSet = (k, v) => { try { localStorage.setItem(k, v); } catch (e) {} };
-const isAuthorized = () => lsGet(LS_AUTH) === "true" || lsGet(LS_OLD) === "1";
-const esc = t => String(t).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-const vibrate = p => { try { navigator.vibrate && navigator.vibrate(p); } catch (e) {} };
-const fmt = ts => ts ? new Date(ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "";
-const gateOpen = () => !$("audioGate").classList.contains("hidden");
-let lastState = null;
+let muted = LS.get("soundMuted") === "true";   // Son's "vibrate only" switch (browsers cannot read the phone's ringer mode)
 
-/* ---------- Icon: indigo tile + white/gold desk call-bell, drawn on canvas ---------- */
-function drawIcon(size) {
-  const cv = document.createElement("canvas");
-  cv.width = cv.height = size;
-  const g = cv.getContext("2d"), s = size / 512;
-  g.scale(s, s);
-  // rich indigo, full-bleed (maskable-safe)
-  const bg = g.createLinearGradient(0, 0, 512, 512);
-  bg.addColorStop(0, "#5b5bf0"); bg.addColorStop(0.55, "#3730a3"); bg.addColorStop(1, "#1e1b4b");
-  g.fillStyle = bg; g.fillRect(0, 0, 512, 512);
-  const glow = g.createRadialGradient(256, 300, 20, 256, 300, 260);
-  glow.addColorStop(0, "rgba(165,180,252,.45)"); glow.addColorStop(1, "rgba(165,180,252,0)");
-  g.fillStyle = glow; g.fillRect(0, 0, 512, 512);
-  // ring rays
-  g.strokeStyle = "#fde68a"; g.lineWidth = 20; g.lineCap = "round";
-  [-160, -125, -55, -20].forEach(d => {
-    const a = d * Math.PI / 180;
-    g.beginPath();
-    g.moveTo(256 + 158 * Math.cos(a), 330 + 158 * Math.sin(a));
-    g.lineTo(256 + 200 * Math.cos(a), 330 + 200 * Math.sin(a));
-    g.stroke();
-  });
-  // dome
-  const dome = g.createLinearGradient(0, 200, 0, 336);
-  dome.addColorStop(0, "#ffffff"); dome.addColorStop(1, "#c7d2fe");
-  g.fillStyle = dome;
-  g.beginPath(); g.moveTo(130, 332); g.arc(256, 332, 126, Math.PI, 2 * Math.PI); g.closePath(); g.fill();
-  // knob
-  g.fillStyle = "#fbbf24";
-  g.fillRect(244, 178, 24, 30);
-  g.beginPath(); g.arc(256, 172, 24, 0, Math.PI * 2); g.fill();
-  // base
-  g.fillStyle = "#fbbf24";
-  g.beginPath();
-  if (g.roundRect) g.roundRect(94, 340, 324, 44, 22); else g.rect(94, 340, 324, 44);
-  g.fill();
-  // dome highlight
-  g.strokeStyle = "rgba(79,70,229,.35)"; g.lineWidth = 14;
-  g.beginPath(); g.arc(256, 332, 96, Math.PI * 1.08, Math.PI * 1.38); g.stroke();
-  return cv.toDataURL("image/png");
+/* ---------- App icon (drawn on canvas: indigo tile + white bell) + inline PWA manifest ---------- */
+function makeIcon(size) {
+  const c = document.createElement("canvas"); c.width = c.height = size;
+  const x = c.getContext("2d");
+  const g = x.createLinearGradient(0, 0, size, size);
+  g.addColorStop(0, "#6366f1"); g.addColorStop(1, "#312e81");
+  x.fillStyle = g; x.fillRect(0, 0, size, size);           // full-bleed (safe for maskable)
+  x.scale(size / 512, size / 512);
+  x.fillStyle = "#fff";
+  x.fill(new Path2D("M256 96c-14 0-24 10-24 22v6c-52 12-88 58-88 112v72l-32 40v16h288v-16l-32-40v-72c0-54-36-100-88-112v-6c0-12-10-22-24-22z"));
+  x.beginPath(); x.arc(256, 404, 32, 0, Math.PI * 2); x.fill();
+  return c.toDataURL("image/png");
 }
-
-/* ---------- PWA manifest (inline) + icons ---------- */
-const ICON192 = drawIcon(192), ICON512 = drawIcon(512);
+const ICON512 = makeIcon(512), ICON192 = makeIcon(192), ICON180 = makeIcon(180);
 (() => {
-  const base = location.href.split("?")[0].split("#")[0];
-  const dir = base.slice(0, base.lastIndexOf("/") + 1);
+  const add = (rel, href, extra = {}) => {
+    const l = document.createElement("link"); l.rel = rel; l.href = href;
+    Object.entries(extra).forEach(([k, v]) => l.setAttribute(k, v)); document.head.appendChild(l);
+  };
+  add("icon", ICON192, { type: "image/png" });
+  add("apple-touch-icon", ICON180);
+  const base = location.origin + location.pathname;
   const m = {
-    id: base + "?role=" + role,
-    name: role === "mother" ? "Room Alert (Mom)" : "Room Alert (Son)",
-    short_name: role === "mother" ? "Alert Mom" : "Alert Son",
-    description: "Room intercom and alert system",
-    start_url: base + "?role=" + role,
-    scope: dir,
-    display: "standalone",
-    display_override: ["fullscreen", "standalone"],
-    orientation: "portrait",
+    id: base + "?app=room-alert", name: "Room Alert", short_name: "Room Alert",
+    description: "In-house room call and emergency pager",
+    start_url: base + "?role=" + role,           // installed icon opens on this phone's role
+    scope: base.replace(/[^/]*$/, ""),
+    display: "standalone", display_override: ["standalone"], orientation: "portrait",
     background_color: "#312e81", theme_color: "#312e81",
-    categories: ["lifestyle", "utilities"],
     icons: [
       { src: ICON192, sizes: "192x192", type: "image/png", purpose: "any" },
       { src: ICON512, sizes: "512x512", type: "image/png", purpose: "any" },
       { src: ICON512, sizes: "512x512", type: "image/png", purpose: "maskable" }
     ]
   };
-  const add = (rel, href, extra = {}) => {
-    const l = document.createElement("link"); l.rel = rel; l.href = href;
-    Object.entries(extra).forEach(([k, v]) => l.setAttribute(k, v));
-    document.head.appendChild(l);
-  };
   add("manifest", URL.createObjectURL(new Blob([JSON.stringify(m)], { type: "application/manifest+json" })));
-  add("icon", ICON192, { type: "image/png" });
-  add("apple-touch-icon", ICON512);
 })();
-
-/* ---------- Service worker (sw.js beside index.html) ---------- */
-const swReady = ("serviceWorker" in navigator)
-  ? navigator.serviceWorker.register("sw.js")
-      .then(r => { try { r.update(); } catch (e) {} return navigator.serviceWorker.ready; })
-      .catch(() => null)
-  : Promise.resolve(null);
 
 /* ---------- Role toggle ---------- */
 const other = role === "mother" ? "son" : "mother";
@@ -214,8 +151,8 @@ $("roleToggle").textContent = `Role: ${role} (switch to ${other})`;
 $("roleToggle").onclick = () => { params.set("role", other); location.search = params.toString(); };
 
 /* ---------- Audio engine ---------- */
-let ctx = null, master = null, chimeTimer = null, sirenOsc = null, sirenGain = null, sirenTimer = null, sirenT = 0;
-let keepOsc = null, buzzTimer = null, wakeLock = null;
+let ctx = null, master = null, chimeTimer = null, sirenOsc = null, sirenGain = null, sirenTimer = null, wakeLock = null;
+const audioReady = () => !!ctx && ctx.state === "running";
 
 function ensureCtx() {
   if (!ctx) {
@@ -225,27 +162,11 @@ function ensureCtx() {
     comp.attack.value = 0.003; comp.release.value = 0.2;
     master = ctx.createGain(); master.gain.value = 1.0;
     master.connect(comp); comp.connect(ctx.destination);
-    ctx.onstatechange = () => {
-      if (ctx.state === "running") { startKeepAlive(); if (chimeTimer) chimeBurst(); }
-      else armUnlock();
-      updateChip();
-    };
+    ctx.onstatechange = () => { if (audioReady()) applyAudio(); };
   }
-  if (ctx.state !== "running") ctx.resume().catch(() => {});
-  else startKeepAlive();
+  if (ctx.state !== "running") ctx.resume().then(() => applyAudio()).catch(() => {});
   return ctx;
 }
-
-/* Inaudible tone keeps the page flagged as "playing audio" so mobile browsers freeze/throttle it less in background. Best effort. */
-function startKeepAlive() {
-  if (keepOsc || !ctx || ctx.state !== "running") return;
-  try {
-    const o = ctx.createOscillator(), g = ctx.createGain();
-    o.frequency.value = 40; g.gain.value = 0.0015;
-    o.connect(g).connect(ctx.destination); o.start(); keepOsc = o;
-  } catch (e) {}
-}
-
 function bellTone(freq, start, dur, vol) {
   [[1, 1, "sine"], [2, 0.38, "sine"], [3, 0.16, "triangle"]].forEach(([mult, amp, type]) => {
     const o = ctx.createOscillator(), g = ctx.createGain();
@@ -259,154 +180,194 @@ function bellTone(freq, start, dur, vol) {
 }
 function chimeOnce(t) {
   const C = 523.25, E = 659.25, G = 783.99;
-  bellTone(C, t,        0.9, 0.55);
-  bellTone(E, t + 0.20, 0.9, 0.55);
-  bellTone(G, t + 0.40, 0.9, 0.55);
+  bellTone(C, t, 0.9, 0.55); bellTone(E, t + 0.20, 0.9, 0.55); bellTone(G, t + 0.40, 0.9, 0.55);
   [C, E, G, C * 2].forEach(f => bellTone(f, t + 0.65, 1.5, 0.5));
 }
 function chimeBurst() {
-  if (!ctx || ctx.state !== "running") return; // never queue while suspended (would blast on resume)
+  if (!audioReady()) return;
   const t = ctx.currentTime + 0.02;
   chimeOnce(t); chimeOnce(t + 1.6); chimeOnce(t + 3.2);
 }
 function startChime() {
   stopSiren();
-  if (chimeTimer) return;
-  ensureCtx(); chimeBurst();
+  if (chimeTimer || !audioReady()) return;
+  chimeBurst();
   chimeTimer = setInterval(chimeBurst, 7500);
 }
 function stopChime() { clearInterval(chimeTimer); chimeTimer = null; }
-
-/* Siren pitch steps are pre-scheduled on the audio clock, so background timer throttling can't slow it */
-function scheduleSiren(steps) {
-  for (let i = 0; i < steps; i++) sirenOsc.frequency.setValueAtTime(i % 2 ? 1200 : 800, sirenT + i * 0.4);
-  sirenT += steps * 0.4;
-}
 function startSiren() {
   stopChime();
-  if (sirenOsc) return;
-  ensureCtx();
+  if (sirenOsc || !audioReady()) return;
   sirenOsc = ctx.createOscillator(); sirenGain = ctx.createGain();
-  sirenOsc.type = "square"; sirenGain.gain.value = 0.55;
-  sirenOsc.connect(sirenGain).connect(master);
-  sirenT = ctx.currentTime; scheduleSiren(300);          // 2 min ahead
-  sirenOsc.start();
-  sirenTimer = setInterval(() => { if (sirenOsc) scheduleSiren(150); }, 60000);
+  sirenOsc.type = "square"; sirenGain.gain.value = 0.55; sirenOsc.frequency.value = 800;
+  sirenOsc.connect(sirenGain).connect(master); sirenOsc.start();
+  let hi = false;
+  sirenTimer = setInterval(() => {
+    hi = !hi; sirenOsc.frequency.setTargetAtTime(hi ? 1200 : 800, ctx.currentTime, 0.02);
+  }, 400);
 }
 function stopSiren() {
   clearInterval(sirenTimer); sirenTimer = null;
   if (sirenOsc) { try { sirenOsc.stop(); } catch (e) {} sirenOsc.disconnect(); sirenOsc = null; }
 }
+function stopAllAudio() { stopChime(); stopSiren(); }
+function showResume(on) { const b = $("resumeBar"); if (b) b.classList.toggle("hidden", !on); }
 
-/* Repeating aggressive vibration while an alert is active */
-function startBuzz(pat, every) { stopBuzz(); vibrate(pat); buzzTimer = setInterval(() => vibrate(pat), every); }
-function stopBuzz() { clearInterval(buzzTimer); buzzTimer = null; vibrate(0); }
-function stopAllAudio() { stopChime(); stopSiren(); stopBuzz(); }
+/* Start/stop audio to match the current alert. Safe to call any time. */
+let vibTimer = null, vibKind = "";
+function startVibLoop(st) {
+  if (vibTimer && vibKind === st) return;
+  stopVibLoop(); vibKind = st;
+  const p = st === "emergency" ? [500, 200, 500, 200, 500] : [300, 150, 300];
+  vibrate(p); vibTimer = setInterval(() => vibrate(p), 2500);
+}
+function stopVibLoop() { clearInterval(vibTimer); vibTimer = null; vibKind = ""; vibrate(0); }
+
+function applyAudio() {
+  if (role !== "son" || !lastState) return;
+  const st = effective(lastState);
+  if (st === "idle") { stopAllAudio(); stopVibLoop(); showResume(false); return; }
+  startVibLoop(st);                                   // vibration always, screen flash is CSS
+  if (muted) { stopAllAudio(); showResume(false); return; }   // vibrate-only mode: no Web Audio
+  if (gateOpen()) return;
+  if (!audioReady()) { ensureCtx(); showResume(true); return; }
+  showResume(false);
+  st === "calling" ? startChime() : startSiren();
+}
 
 async function keepAwake() {
-  try { if ("wakeLock" in navigator && document.visibilityState === "visible") wakeLock = await navigator.wakeLock.request("screen"); } catch (e) {}
+  try { if ("wakeLock" in navigator) wakeLock = await navigator.wakeLock.request("screen"); } catch (e) {}
 }
 
-/* ---------- Persistent sound permission ---------- */
-// Gate appears only until `soundAuthorized` is saved. Browsers still suspend AudioContext on each
-// cold load, so the first tap anywhere silently resumes it; no overlay, no prompt.
-const UNLOCK_EVENTS = ["pointerup", "touchend", "click", "keydown"];
-function onGesture() {
-  if (gateOpen()) return;
-  ensureCtx();
-  if (ctx.state === "running") UNLOCK_EVENTS.forEach(e => removeEventListener(e, onGesture, true));
-}
-function armUnlock() { UNLOCK_EVENTS.forEach(e => addEventListener(e, onGesture, true)); }
+/* ---------- Audio gate: shown only until first-ever tap ---------- */
+const gateOpen = () => !$("audioGate").classList.contains("hidden");
+const soundOn = () => LS.get("soundEnabled") === "true";
+if (soundOn()) { $("audioGate").classList.add("hidden"); ensureCtx(); }
 
 $("audioBtn").onclick = () => {
-  lsSet(LS_AUTH, "true");
-  ensureCtx(); bellTone(659.25, ctx.currentTime, 0.8, 0.4); // confirmation ding
+  LS.set("soundEnabled", "true");
+  ensureCtx(); bellTone(659.25, ctx.currentTime, 0.8, 0.4);
   $("audioGate").classList.add("hidden");
-  keepAwake();
-  requestNotif();                                           // prompt needs this user gesture
-  updateChip();
-  if (lastState) render(lastState);
+  keepAwake(); askNotif(); applyAudio();
 };
+// Any touch anywhere resumes a suspended audio context (browser autoplay rule).
+["pointerdown", "touchstart", "keydown", "click"].forEach(ev =>
+  document.addEventListener(ev, () => { if (soundOn() && !audioReady()) ensureCtx(); }, { passive: true }));
+$("resumeBar").onclick = () => ensureCtx();
+const sm = $("soundMode");
+function paintMode() {
+  sm.textContent = muted ? "📳 Vibrate only" : "🔊 Sound on";
+  sm.className = "text-sm font-bold rounded-full px-3 py-1 " + (muted ? "bg-amber-200 text-amber-900" : "bg-green-200 text-green-900");
+}
+if (role === "son") {
+  paintMode();
+  sm.onclick = () => { muted = !muted; LS.set("soundMuted", String(muted)); paintMode(); applyAudio(); };
+}
 
 /* ---------- Notifications ---------- */
-const notifSupported = () => "Notification" in window;
-let fallbackNote = null;
-
-async function requestNotif() {
-  if (!notifSupported() || Notification.permission !== "default") return;
-  try { await Notification.requestPermission(); } catch (e) {}
-  updateChip();
+let swReg = null, liveNotif = null, renotifyTimer = null;
+if ("serviceWorker" in navigator) {
+  navigator.serviceWorker.register("./sw.js").then(r => { swReg = r; }).catch(() => {});
 }
-async function notify(title, opts = {}) {
-  if (!notifSupported() || Notification.permission !== "granted") return;
-  const o = { icon: ICON192, badge: ICON192, lang: "en", silent: false, timestamp: Date.now(), data: { url: location.href }, ...opts };
-  const reg = await swReady;
-  try { if (reg) { await reg.showNotification(title, o); return; } } catch (e) {}
-  try { // desktop fallback if sw.js is missing
-    if (fallbackNote) fallbackNote.close();
-    fallbackNote = new Notification(title, o);
-    fallbackNote.onclick = () => { window.focus(); fallbackNote.close(); };
-  } catch (e) {}
+function askNotif() {
+  if (!("Notification" in window) || Notification.permission !== "default") return updateChip();
+  try { Promise.resolve(Notification.requestPermission()).then(updateChip); } catch (e) { updateChip(); }
 }
-async function clearNotes() {
-  try { if (fallbackNote) { fallbackNote.close(); fallbackNote = null; } } catch (e) {}
-  try {
-    const reg = await swReady;
-    if (reg) (await reg.getNotifications({ tag: "room-alert" })).forEach(n => n.close());
-  } catch (e) {}
-}
-
-/* ---------- Enable chip ---------- */
 function updateChip() {
-  const chip = $("enableChip");
-  if (!chip) return;
-  const open = gateOpen();
-  const needSound = !open && (!ctx || ctx.state !== "running");
-  const needNotif = !open && notifSupported() && Notification.permission === "default";
-  chip.classList.toggle("hidden", !(needSound || needNotif));
-  chip.textContent = needSound && needNotif ? "🔇 Tap to enable sound & alerts"
-                   : needSound ? "🔇 Tap to enable sound" : "🔕 Tap to enable alerts";
+  let chip = $("notifChip");
+  const need = "Notification" in window && Notification.permission === "default" && !gateOpen();
+  const blocked = "Notification" in window && Notification.permission === "denied";
+  if (!need && !blocked) { if (chip) chip.remove(); return; }
+  if (!chip) {
+    chip = document.createElement("button"); chip.id = "notifChip";
+    chip.className = "press rounded-2xl px-4 py-3 text-base font-bold text-center";
+    $("app").insertBefore(chip, $("view"));
+  }
+  if (need) {
+    chip.className += " bg-indigo-600 text-white";
+    chip.textContent = "🔔 Tap to allow notifications";
+    chip.onclick = askNotif;
+  } else {
+    chip.className = "rounded-2xl px-4 py-3 text-sm font-semibold text-center bg-amber-100 text-amber-900";
+    chip.textContent = "Notifications blocked. Allow them in browser or phone settings.";
+    chip.onclick = null;
+  }
 }
-$("enableChip").onclick = () => { ensureCtx(); requestNotif(); updateChip(); };
+function pushNotif(title, body, vib) {
+  if (!("Notification" in window) || Notification.permission !== "granted") return;
+  const opts = { body, tag: "room-alert", renotify: true, requireInteraction: true,
+    vibrate: vib, icon: ICON192, badge: ICON192 };
+  if (swReg && swReg.showNotification) swReg.showNotification(title, opts).catch(() => {});
+  else { try { liveNotif = new Notification(title, opts); liveNotif.onclick = () => { window.focus(); liveNotif.close(); }; } catch (e) {} }
+}
+function closeNotif() {
+  try { liveNotif && liveNotif.close(); } catch (e) {}
+  if (swReg && swReg.getNotifications) swReg.getNotifications({ tag: "room-alert" }).then(a => a.forEach(n => n.close())).catch(() => {});
+}
+function alertNotif(st) {
+  const em = st === "emergency";
+  pushNotif(em ? "🚨 EMERGENCY from Mom" : "🔔 Mom needs you",
+    em ? "Emergency! Open the app and reply now." : "Mom needs you in her room.",
+    em ? [500, 200, 500, 200, 500, 200, 500] : [300, 150, 300]);
+}
 
-/* ---------- Firebase: connection handling ---------- */
-let db, stateRef, connected = false, kickTimer = null;
+/* ---------- Helpers ---------- */
+const vibrate = p => { try { navigator.vibrate && navigator.vibrate(p); } catch (e) {} };
+const fmt = ts => ts ? new Date(ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "";
+
+/* ---------- Firebase ---------- */
+let db, stateRef, lastState = null, handledTs = 0, alertKey = "";
 const idle = () => ({ status: "idle", mother_timestamp: 0, son_response: "Idle", response_timestamp: 0 });
+/* Son's view of status: a call he already answered counts as idle, even if the write is still in flight. */
+const effective = s => (s.status !== "idle" && handledTs && s.mother_timestamp === handledTs) ? "idle" : s.status;
 
 function setConn(ok, msg) {
   $("dot").className = "w-3.5 h-3.5 rounded-full " + (ok ? "bg-green-500" : "bg-red-500");
   $("conn").textContent = msg;
-  const bar = $("netBar");
-  if (ok) bar.classList.add("hidden");
-  else if (configured) {
-    bar.textContent = role === "son" ? "⚠ Offline. You will NOT get calls until reconnected." : "⚠ Offline. Calls will send when reconnected.";
-    bar.classList.remove("hidden");
+}
+
+if (!configured) {
+  $("cfgWarn").classList.remove("hidden"); setConn(false, "Not configured"); buildView();
+} else {
+  try {
+    db = getDatabase(initializeApp(firebaseConfig));
+    stateRef = ref(db, "room_alert");
+    onValue(ref(db, ".info/connected"), s =>
+      s.val() ? setConn(true, role === "mother" ? "Connected to Home Network" : "Connected") : setConn(false, "Reconnecting…"));
+    get(stateRef).then(s => { if (!s.exists()) set(stateRef, idle()); }).catch(e => setConn(false, "DB error: " + e.code));
+    buildView();
+    onValue(stateRef, s => { lastState = { ...idle(), ...(s.val() || {}) }; render(lastState); },
+      e => setConn(false, "DB error: " + e.code));
+  } catch (e) {
+    setConn(false, "Config error"); $("cfgWarn").classList.remove("hidden"); buildView();
   }
 }
-// Firebase auto-reconnects with backoff; this nudges it so recovery after a signal drop or app resume is fast.
-function kick() {
-  clearTimeout(kickTimer);
-  if (connected || !db) return;
-  try { goOffline(); setTimeout(() => { try { goOnline(); } catch (e) {} }, 400); } catch (e) {}
-  kickTimer = setTimeout(kick, 12000);
-}
-addEventListener("online",  () => { if (!connected) { setConn(false, "Reconnecting…"); kick(); } });
-addEventListener("offline", () => setConn(false, "No internet"));
-
-document.addEventListener("visibilitychange", () => {
-  if (document.visibilityState !== "visible") return;
-  keepAwake();
-  if (!gateOpen() && ctx && ctx.state !== "running") { ctx.resume().catch(() => {}); armUnlock(); }
-  if (!connected) kick();
-  updateChip();
-});
+updateChip();
 
 function send(patch) {
-  if (!stateRef) return Promise.reject(new Error("Firebase not configured"));
+  if (!stateRef) { alert("Firebase not configured."); return Promise.reject(); }
   return update(stateRef, patch);
 }
 
+/* ---------- Coming back to the app (unlock / tab switch) ---------- */
+function onReturn() {
+  if (document.hidden) return;
+  keepAwake(); closeNotif();
+  if (db) { try { goOnline(db); } catch (e) {} }
+  if (soundOn()) ensureCtx();
+  if (lastState) render(lastState);   // overlay + audio start instantly if an alert is active
+}
+document.addEventListener("visibilitychange", onReturn);
+window.addEventListener("focus", onReturn);
+window.addEventListener("pageshow", onReturn);
+
 /* ---------- Views ---------- */
+const TONES = {
+  idle:  "bg-white border-slate-400 text-slate-900",
+  call:  "bg-amber-200 border-amber-500 text-amber-950",
+  emerg: "bg-red-200 border-red-600 text-red-950",
+  reply: "bg-green-200 border-green-600 text-green-950"
+};
 function buildView() {
   const v = $("view");
   if (role === "mother") {
@@ -414,19 +375,18 @@ function buildView() {
       <div class="flex-1 flex flex-col justify-center">
         <div class="bell-wrap">
           <button id="callBtn" class="bell press" aria-label="Ring bell, call son">
-            <span class="icon">🔔</span>
-            <span class="lbl">Need You</span>
+            <span class="icon">🔔</span><span class="lbl">Need You</span>
           </button>
         </div>
         <button id="emBtn" class="em press w-full py-6 rounded-3xl text-white text-3xl font-black tracking-wide">🚨 EMERGENCY</button>
       </div>
-      <div id="statusCard" aria-live="assertive" class="rounded-3xl border-4 p-6 text-center min-h-[11rem] flex flex-col items-center justify-center gap-2 shadow-lg"></div>`;
+      <div id="statusCard" aria-live="assertive"></div>`;
     const press = (btn, status, pat) => btn.onclick = () => {
       vibrate(pat);
       btn.classList.remove("hit"); void btn.offsetWidth; btn.classList.add("hit");
       setTimeout(() => btn.classList.remove("hit"), 750);
-      send({ status, mother_timestamp: Date.now(), son_response: "Idle", response_timestamp: 0 })
-        .catch(e => setConn(false, "Send failed: " + (e.code || e.message)));
+      send({ status, mother_timestamp: serverTimestamp(), son_response: "Idle", response_timestamp: 0 })
+        .catch(e => alert("Send failed: " + (e && e.code || "check connection")));
     };
     press($("callBtn"), "calling", 80);
     press($("emBtn"), "emergency", [200, 100, 200, 100, 200]);
@@ -437,41 +397,36 @@ function buildView() {
         <div class="text-7xl mb-4">🌿</div>
         <div class="text-3xl font-black">Monitoring alerts…</div>
         <div class="text-xl mt-1">Everything is quiet.</div>
-        <div id="sendState" class="mt-5 text-2xl font-extrabold"></div>
-        <div id="lastSent" class="mt-2 text-base font-semibold text-green-800"></div>
+        <div id="lastSent" class="mt-5 text-base font-semibold text-green-800"></div>
       </div>`;
     const g = $("alertBtns");
-    g.innerHTML = RESPONSES.map((r, i) => `<button data-i="${i}" class="reply press w-full px-4">${esc(r)}</button>`).join("");
-    g.querySelectorAll("button").forEach(b => b.onclick = async () => {
-      const text = RESPONSES[+b.dataset.i];
-      stopAllAudio(); vibrate(50); clearNotes();
-      const ss = $("sendState");
-      ss.textContent = "⏳ Sending…";
-      let done = false;
-      const t = setTimeout(() => { if (!done) ss.textContent = "📡 Offline. Will send when back online."; }, 4000);
-      try {
-        // Single atomic write: clears alert + sets reply. Local listener fires instantly, so overlay closes at once.
-        await send({ status: "idle", son_response: text, response_timestamp: Date.now() });
-        done = true; clearTimeout(t);
-        ss.textContent = `✓ Delivered: ${text}`;
-      } catch (e) {
-        done = true; clearTimeout(t);
-        ss.textContent = "⚠ Not delivered: " + (e.code || e.message);
-      }
-    });
+    g.innerHTML = RESPONSES.map(r => `<button data-r="${r}" class="reply press w-full px-4">${r}</button>`).join("");
+    g.querySelectorAll("button").forEach(b => b.onclick = () => reply(b.dataset.r));
   }
+}
+
+/* Son taps a quick reply: silence + hide locally at once, then patch Firebase. */
+function reply(text) {
+  vibrate(50);
+  stopAllAudio(); stopVibLoop(); closeNotif(); clearInterval(renotifyTimer);
+  handledTs = (lastState && lastState.mother_timestamp) || 0;
+  if (lastState) render(lastState);
+  send({ status: "idle", son_response: text, response_timestamp: serverTimestamp() })
+    .catch(e => {                       // write failed: bring the alert back so the reply can be retried
+      handledTs = 0; alertKey = "";
+      alert("Reply not sent (" + (e && e.code || "offline") + "). Try again.");
+      if (lastState) render(lastState);
+    });
 }
 
 function renderStatus(tone, small, big, time) {
   const c = $("statusCard");
   if (!c) return;
   c.className = "rounded-3xl border-4 p-6 text-center min-h-[11rem] flex flex-col items-center justify-center gap-2 shadow-lg " + tone;
-  c.innerHTML = (small ? `<div class="text-3xl font-bold">${esc(small)}</div>` : "") +
-    `<div class="text-4xl font-black leading-tight break-words max-w-full">${esc(big)}</div>` +
-    (time ? `<div class="text-3xl font-extrabold">${esc(time)}</div>` : "");
+  c.innerHTML = (small ? `<div class="text-2xl font-bold opacity-80">${small}</div>` : "") +
+    `<div class="text-4xl font-black leading-tight">${big}</div>` +
+    (time ? `<div class="text-3xl font-extrabold">${time}</div>` : "");
 }
-
-let lastAlertKey = "", lastReplyKey = null; // null = first snapshot not processed yet
 
 function render(s) {
   if (role === "mother") {
@@ -479,82 +434,38 @@ function render(s) {
     else if (s.status === "emergency") renderStatus(TONES.emerg, "", "🚨 Emergency sent. Waiting for Son", "");
     else if (s.son_response && s.son_response !== "Idle") {
       renderStatus(TONES.reply, "Son responded:", s.son_response, fmt(s.response_timestamp));
-      const key = String(s.response_timestamp);
-      if (lastReplyKey !== null && key !== lastReplyKey) {   // genuinely new reply
-        vibrate([100, 60, 100, 60, 300]);
-        if (document.visibilityState === "hidden")
-          notify("Son replied", { body: `${s.son_response} · ${fmt(s.response_timestamp)}`, tag: "room-reply", renotify: true, requireInteraction: true, vibrate: [200, 100, 200] });
+      const c = $("statusCard"), k = s.son_response + ":" + s.response_timestamp;
+      if (c.dataset.seen !== k) {
+        c.dataset.seen = k; vibrate([100, 60, 100]);
+        if (document.hidden) pushNotif("Son replied", s.son_response, [100, 60, 100]);
       }
-      lastReplyKey = key;
     } else renderStatus(TONES.idle, "", "Son is available", "");
-    if (lastReplyKey === null) lastReplyKey = String(s.response_timestamp);
     return;
   }
-  // Son
-  const ov = $("alertOv"), head = $("alertHead");
-  const last = $("lastSent");
+
+  /* Son */
+  const ov = $("alertOv"), head = $("alertHead"), last = $("lastSent");
+  const st = effective(s);
   if (last) last.textContent = s.son_response !== "Idle" ? `Last reply: ${s.son_response} (${fmt(s.response_timestamp)})` : "";
-  if (s.status === "idle") {
+  if (st === "idle") {
     ov.classList.add("hidden"); ov.classList.remove("flex", "amber", "red");
-    stopAllAudio(); lastAlertKey = ""; clearNotes(); return;
+    stopAllAudio(); stopVibLoop(); showResume(false); clearInterval(renotifyTimer); alertKey = "";
+    return;
   }
-  const key = s.status + ":" + s.mother_timestamp;
-  const fresh = key !== lastAlertKey;
-  lastAlertKey = key;
   ov.classList.remove("hidden"); ov.classList.add("flex");
-  if (fresh) ensureCtx();                                    // try to wake audio immediately
-  if (s.status === "calling") {
-    ov.classList.add("amber"); ov.classList.remove("red");
-    head.className = "text-4xl font-black mb-6 leading-tight text-slate-900";
-    head.textContent = "Mom needs you in her room!";
-    if (!gateOpen()) startChime();
-    if (fresh) {
-      startBuzz([400, 150, 400, 150, 400], 3000);
-      notify("🔔 Mom needs you", { body: "Tap to open and reply.", tag: "room-alert", renotify: true, requireInteraction: true, vibrate: [400, 150, 400, 150, 400] });
-    }
-  } else {
-    ov.classList.add("red"); ov.classList.remove("amber");
-    head.className = "text-4xl font-black mb-6 leading-tight text-white drop-shadow";
-    head.textContent = "🚨 EMERGENCY ALERT FROM MOM!";
-    if (!gateOpen()) startSiren();
-    if (fresh) {
-      startBuzz([700, 150, 700, 150, 700, 150, 700], 2500);
-      notify("🚨 EMERGENCY from Mom", { body: "Open the app and respond now.", tag: "room-alert", renotify: true, requireInteraction: true, vibrate: [700, 150, 700, 150, 700, 150, 700] });
-    }
-  }
-}
+  const em = st === "emergency";
+  ov.classList.add(em ? "red" : "amber"); ov.classList.remove(em ? "amber" : "red");
+  head.className = "text-4xl font-black mb-6 leading-tight " + (em ? "text-white drop-shadow" : "text-slate-900");
+  head.textContent = em ? "🚨 EMERGENCY ALERT FROM MOM!" : "Mom needs you in her room!";
 
-/* ---------- Init (last, after every declaration above) ---------- */
-if (isAuthorized()) {
-  if (lsGet(LS_AUTH) !== "true") lsSet(LS_AUTH, "true");     // migrate old key
-  try { ensureCtx(); } catch (e) {}
-  keepAwake();
-}
-armUnlock();
-updateChip();
-
-if (!configured) {
-  $("cfgWarn").classList.remove("hidden");
-  setConn(false, "Not configured");
-  buildView();
-} else {
-  try {
-    db = getDatabase(initializeApp(firebaseConfig));
-    stateRef = ref(db, "room_alert");
-    if (!navigator.onLine) setConn(false, "No internet");
-    onValue(ref(db, ".info/connected"), s => {
-      connected = !!s.val();
-      if (connected) { clearTimeout(kickTimer); setConn(true, role === "mother" ? "Connected to Home Network" : "Connected"); }
-      else { setConn(false, navigator.onLine ? "Reconnecting…" : "No internet"); clearTimeout(kickTimer); kickTimer = setTimeout(kick, 8000); }
-    });
-    get(stateRef).then(s => { if (!s.exists()) set(stateRef, idle()); }).catch(e => setConn(false, "DB error: " + e.code));
-    buildView();
-    onValue(stateRef, s => { lastState = { ...idle(), ...(s.val() || {}) }; render(lastState); },
-      e => setConn(false, "DB error: " + e.code));
-  } catch (e) {
-    console.error(e);
-    setConn(false, "Config error"); $("cfgWarn").classList.remove("hidden");
+  const key = st + ":" + s.mother_timestamp;
+  if (key !== alertKey) {                         // brand-new alert (or escalation)
+    alertKey = key;
+    clearInterval(renotifyTimer);
+    if (document.hidden) alertNotif(st);
+    renotifyTimer = setInterval(() => { if (document.hidden) alertNotif(st); }, 20000);
   }
+  applyAudio();
 }
 </script>
 </body>
